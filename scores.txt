@@ -1,36 +1,4 @@
-s - 0
-lazaro - 30
-dally - 30
-lazaro - 20
-s - 0
-s - 0
-s - 0
-s - 0
-hola amigos - 60
-koko - 60
-dwd - 0
-dd - 10
-ds - 20
-ddddsdsd - 20
-d - 0
-s - 0
-lolo - 60
-cc - 0
-ss  - 0
-ddddddddddd - 0
-sss - 10
-sds - 0
-df - 0
-ccc - 30
-dd - 40
-s - 10
-asas - 40
-sss - 0
-das - 0
-d - 0
-sd - 0
-ggg - 0
-Anonimo - 0
-Anonimo - 0
-Anonimo - 0
-Anonimo - 0
+
+ wicho - 60
+ holaaaaaaaa - 60
+wicho - 60

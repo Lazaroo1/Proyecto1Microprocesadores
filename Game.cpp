@@ -111,7 +111,7 @@ void Game::startGame() {
     resetGame();
     gameRunning = true;
     paused = false;
-    returnToMenu = false;
+    returnToMenu = false; // <-- CORRECCIÓN: permitir que los hilos corran
 
     // crear los 10 hilos 
     pthread_t threads[10];
@@ -130,16 +130,32 @@ void Game::startGame() {
     pthread_create(&threads[8], NULL, ship2UpdateThread, this);
     pthread_create(&threads[9], NULL, hudUpdateThread, this);
 
-    // esperar a que terminen todos
+    // ESPERAR A QUE EL JUEGO TERMINE 
+    while (gameRunning && !returnToMenu) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    // Señalar a todos los hilos que deben terminar (cierre ordenado)
+    gameRunning = false;
+    returnToMenu = true;
+
+    // Despertar hilos que puedan estar esperando en condition_variables
+    cvUpdate.notify_all();
+
+    // Esperar a que todos los hilos terminen (sin pthread_cancel)
     for (int i = 0; i < 10; i++) {
         pthread_join(threads[i], NULL);
     }
 
-
+    // MOSTRAR PANTALLA FINAL Y GUARDAR PUNTAJES
     showEndGameScreen();
-
+    
+    // Limpiar recursos y volver al menú
+    bullets.clear();
+    asteroids.clear();
     returnToMenu = true;
 }
+
 
 void Game::resetGame() {
     getmaxyx(stdscr, maxy, maxx);
@@ -158,8 +174,8 @@ void Game::resetGame() {
 
 void Game::spawnInitialAsteroids() {
     std::lock_guard<std::mutex> lock(mtxAsteroids);
-    int count = (mode == 1) ? 3 : 5;
-    if (mode == 3) count = 5;
+    int count = (mode == 1) ? 10 : 15;
+    if (mode == 3) count = 15;
     for (int i=0; i<count; ++i) {
         double x = rand() % (maxx-8) + 4;
         double y = (rand() % (maxy-8)) + 2;
@@ -180,21 +196,16 @@ void Game::spawnInitialAsteroids() {
 void* Game::inputThread(void* arg) {
     Game* g = (Game*)arg;
     
-// El bucle depende de gameRunning para salir 
-    while (g->gameRunning) { 
-        // Si gameRunning es false, saldrá inmediatamente
-        if (!g->gameRunning) break; 
-        
+    while (g->gameRunning && !g->returnToMenu) { 
         int ch = ERR;
         {
-            // La protección con mutex es correcta
             std::lock_guard<std::mutex> lock(g->mtxNcurses);  
             ch = getch();
         }
         if (ch != ERR) {
             g->handleInput(ch);
         }
-        usleep(20000); // 50 Hz input polling para reducir CPU 
+        usleep(20000);
     }
     
     return NULL;
@@ -207,7 +218,7 @@ void* Game::updateThread(void* arg) {
         if (!g->paused) {
             g->cvUpdate.notify_all(); 
         }
-        usleep(33000); // ~30 Hz update rate para reducir CPU
+        usleep(33000);
     }
     
     return NULL;
@@ -218,31 +229,28 @@ void* Game::collisionThread(void* arg) {
     
     while (g->gameRunning && !g->returnToMenu) {
         if (!g->paused) {
-            std::lock_guard<std::mutex> lockShips(g->mtxShips);
-            std::lock_guard<std::mutex> lockAst(g->mtxAsteroids);
-            std::lock_guard<std::mutex> lockBul(g->mtxBullets);
-            
+            // Bloquear los 3 mutex a la vez (evita deadlocks por orden distinto) para proteger acceso a todos los objetos
+            std::scoped_lock lock(g->mtxAsteroids, g->mtxBullets, g->mtxShips);
             g->tryCollisions();
         }
-        usleep(50000); // 20 Hz collision detection para reducir CPU 
+        usleep(50000);
     }
     
     return NULL;
 }
 
+
 void* Game::drawThread(void* arg) {
     Game* g = (Game*)arg;
     
-    // Solo depende de gameRunning para salir del bucle
-    while (g->gameRunning) { 
-        if (!g->gameRunning) break; 
-
+    while (g->gameRunning && !g->returnToMenu) { 
         {
             std::lock_guard<std::mutex> lock(g->mtxNcurses);
-            g->drawAll();
+            if (g->gameRunning) {  // Verificar nuevamente dentro del mutex
+                g->drawAll();
+            }
         }
-        // Se mantiene el usleep, pero el bucle depende de la bandera de gameRunning
-        usleep(33000); 
+        usleep(33000);
     }
     
     return NULL;
@@ -252,8 +260,6 @@ void* Game::gameLogicThread(void* arg) {
     Game* g = (Game*)arg;
     
     while (g->gameRunning && !g->returnToMenu) { 
-        if (!g->gameRunning) break; 
-
         if (!g->paused) {
             bool shouldEnd = false;
             {
@@ -276,10 +282,8 @@ void* Game::gameLogicThread(void* arg) {
             }
             
             if (shouldEnd) {
-
-                g->gameRunning = false; // Bajar bandera
-                g->returnToMenu = true; // Bajar bandera secundaria (para menu)
-
+                g->gameRunning = false;
+                g->returnToMenu = true;
                 break;
             }
         }
@@ -416,14 +420,11 @@ void Game::handleInput(int ch) {
 
     // Controles comunes
     if (ch == 'p' || ch == 'P') {
-        // FIX: La variable 'paused' no es atómica en Game.h, debería protegerse.
-        // Asumiendo que es atómica o que mtxShips la cubre de forma efectiva aquí.
         paused = !paused;
     }
     else if (ch == 'q' || ch == 'Q') {
         returnToMenu = true;
         gameRunning = false;
-        
     }
 }
 
@@ -456,7 +457,7 @@ void Game::tryCollisions() {
                 }
                 
                 if (asteroids[i].size == 1) {
-                    if (bullets[j].owner == 1) player.score.fetch_add(10);  // Use atomic
+                    if (bullets[j].owner == 1) player.score.fetch_add(10);
                     else if (bullets[j].owner == 2) player2.score.fetch_add(10);
                 }
                 
@@ -541,7 +542,6 @@ void Game::tryCollisions() {
 }
 
 void Game::checkWinLoseConditions() {
-
     std::lock_guard<std::mutex> lock(mtxShips);
     if (mode == 3) {
         if (player.lives.load() <= 0 && player2.lives.load() <= 0) {
@@ -565,55 +565,62 @@ void Game::checkWinLoseConditions() {
 }
 
 void Game::showEndGameScreen() {
-    std::lock_guard<std::mutex> lock(mtxNcurses);  
-    clear();
-    refresh();
-    
-    // Modo bloqueante para que getch() espere de verdad
-    nodelay(stdscr, FALSE);
-    timeout(-1);
-    curs_set(1);
-    echo();
-    flushinp();
-    
-    clear();
-    int centerX = maxx / 2;
-    
-    if (mode != 3) {
-        if (player.score.load() >= winScore) {
-            mvprintw(maxy/2 - 1, centerX - 10, "*** FELICIDADES! ***");
-            mvprintw(maxy/2 + 1, centerX - 8, "Puntaje: %d", player.score.load());
+    {
+        // Bloqueo SOLO para dibujar la pantalla final 
+        std::lock_guard<std::mutex> lock(mtxNcurses);  
+        clear();
+        refresh();
+        
+        nodelay(stdscr, FALSE);
+        timeout(-1);
+        curs_set(1);
+        echo();
+        flushinp();
+        
+        clear();
+        int centerX = maxx / 2;
+        
+        if (mode != 3) {
+            if (player.score.load() >= winScore) {
+                mvprintw(maxy/2 - 1, centerX - 10, "*** FELICIDADES! ***");
+                mvprintw(maxy/2 + 1, centerX - 8, "Puntaje: %d", player.score.load());
+            } else {
+                mvprintw(maxy/2 - 1, centerX - 8, "*** GAME OVER ***");
+                mvprintw(maxy/2 + 1, centerX - 8, "Puntaje: %d", player.score.load());
+            }
         } else {
-            mvprintw(maxy/2 - 1, centerX - 8, "*** GAME OVER ***");
-            mvprintw(maxy/2 + 1, centerX - 8, "Puntaje: %d", player.score.load());
+            mvprintw(maxy/2 - 2, centerX - 12, "*** PARTIDA TERMINADA ***");
+            mvprintw(maxy/2, centerX - 15, "Jugador 1: %d puntos", player.score.load());
+            mvprintw(maxy/2 + 1, centerX - 15, "Jugador 2: %d puntos", player2.score.load());
+            
+            std::string winner;
+            if (player.score.load() > player2.score.load()) winner = "Jugador 1 GANA!";
+            else if (player2.score.load() > player.score.load()) winner = "Jugador 2 GANA!";
+            else winner = "EMPATE!";
+            
+            mvprintw(maxy/2 + 3, centerX - (int)winner.size()/2, "%s", winner.c_str());
         }
-    } else {
-        mvprintw(maxy/2 - 2, centerX - 12, "*** PARTIDA TERMINADA ***");
-        mvprintw(maxy/2, centerX - 15, "Jugador 1: %d puntos", player.score.load());
-        mvprintw(maxy/2 + 1, centerX - 15, "Jugador 2: %d puntos", player2.score.load());
         
-        std::string winner;
-        if (player.score.load() > player2.score.load()) winner = "Jugador 1 GANA!";
-        else if (player2.score.load() > player.score.load()) winner = "Jugador 2 GANA!";
-        else winner = "EMPATE!";
-        
-        mvprintw(maxy/2 + 3, centerX - (int)winner.size()/2, "%s", winner.c_str());
+        mvprintw(maxy/2 + 5, centerX - 20, "Presiona cualquier tecla para continuar...");
+        refresh();
     }
-    
-    mvprintw(maxy/2 + 5, centerX - 20, "Presiona cualquier tecla para continuar...");
-    refresh();
-    
-    // Esperar input real
-    getch();
-    
-    // Guardar puntajes
+
+    flushinp();   // limpia buffer
+    getch();      // ahora sí funciona
+
+    // Guardar puntajes después de que el jugador presione tecla
     saveScoresAfterGame(mode == 3);
-    
-    noecho();
-    curs_set(0);
-    nodelay(stdscr, TRUE);
-    timeout(0);
+
+    // Restaurar configuración ncurses
+    {
+        std::lock_guard<std::mutex> lock(mtxNcurses);
+        noecho();
+        curs_set(0);
+        nodelay(stdscr, TRUE);
+        timeout(0);
+    }
 }
+
 
 void Game::drawAll() {
     clear();
@@ -714,7 +721,7 @@ double Game::dist(double x1, double y1, double x2, double y2) {
 }
 
 void Game::showInstructions() {
-    std::lock_guard<std::mutex> lock(mtxNcurses);  // Protect ncurses calls
+    std::lock_guard<std::mutex> lock(mtxNcurses);
     clear();
     std::vector<std::string> lines = {
         "INSTRUCCIONES - ASTEROIDS",
@@ -773,7 +780,6 @@ void Game::showScores() {
 }
 
 void Game::saveScoresAfterGame(bool twoPlayers) {
-    std::lock_guard<std::mutex> lock(mtxNcurses);  
     nodelay(stdscr, FALSE);
     timeout(-1);
     echo();
@@ -781,8 +787,6 @@ void Game::saveScoresAfterGame(bool twoPlayers) {
 
     char namebuf[64];
     std::ofstream ofs("scores.txt", std::ios::app);
-    
-  // Verificar si se pudo abrir el archivo
 
     if (!ofs.is_open()) {
         mvprintw(maxy-3, 2, "ERROR: No se pudo abrir scores.txt para guardar.");
@@ -792,37 +796,42 @@ void Game::saveScoresAfterGame(bool twoPlayers) {
         getch();
     } else {
         if (!twoPlayers) {
+            // === MODO 1 o 2 ===
             mvprintw(maxy-4, 2, "Ingresa tu nombre (max 20 caracteres): ");
             move(maxy-4, 44);
             memset(namebuf, 0, sizeof(namebuf));
             getnstr(namebuf, 20);
-            std::string name = std::string(namebuf);
+
+            std::string name(namebuf);
             if (name.empty()) name = "Anonimo";
-            
+
             ofs << name << " - " << player.score.load() << std::endl;
-            
+            ofs.flush(); // asegura que se escriba ya
+
             mvprintw(maxy-3, 2, "Puntaje guardado: %s - %d", name.c_str(), player.score.load());
             mvprintw(maxy-2, 2, "Presiona una tecla para volver al menu...");
             refresh();
             flushinp();
             getch();
         } else {
+            // === MODO 3 (dos jugadores) ===
             mvprintw(maxy-6, 2, "Nombre Jugador 1 (max 20 caracteres): ");
             move(maxy-6, 43);
             memset(namebuf, 0, sizeof(namebuf));
             getnstr(namebuf, 20);
-            std::string n1 = std::string(namebuf);
-            if (n1.empty()) n1 = "P1"; //aon
+            std::string n1(namebuf);
+            if (n1.empty()) n1 = "P1";
 
             mvprintw(maxy-5, 2, "Nombre Jugador 2 (max 20 caracteres): ");
             move(maxy-5, 43);
             memset(namebuf, 0, sizeof(namebuf));
             getnstr(namebuf, 20);
-            std::string n2 = std::string(namebuf);
+            std::string n2(namebuf);
             if (n2.empty()) n2 = "P2";
 
             ofs << n1 << " - " << player.score.load() << std::endl;
             ofs << n2 << " - " << player2.score.load() << std::endl;
+            ofs.flush();
 
             mvprintw(maxy-3, 2, "Puntajes guardados ");
             mvprintw(maxy-2, 2, "Presiona una tecla para volver al menu...");
