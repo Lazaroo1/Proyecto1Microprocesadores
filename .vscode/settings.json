@@ -55,6 +55,11 @@
         "text_encoding": "cpp",
         "thread": "cpp",
         "typeinfo": "cpp",
-        "variant": "cpp"
+        "variant": "cpp",
+        "fstream": "cpp",
+        "condition_variable": "cpp",
+        "cstring": "cpp",
+        "mutex": "cpp",
+        "iostream": "cpp"
     }
 }
